@@ -1,7 +1,6 @@
 use std::{env, process::exit, io::Read};
 use std::fs::File; 
 use std::str;
-use flate2::{Decompress, FlushDecompress};
 use miniz_oxide::inflate::decompress_to_vec_zlib;
 use minifb::{Window, Key, WindowOptions};
 
@@ -13,14 +12,6 @@ struct Chunk{
 
 impl Chunk {
 
-    fn new() -> Chunk{
-        Chunk{
-            chunk_type: [0;4],
-            chunk_data: Vec::new(), 
-            crc: [0;4]
-        }
-    }
-
     fn length(&self) -> usize{
         self.chunk_type().len()
     }
@@ -29,23 +20,26 @@ impl Chunk {
         str::from_utf8(&self.chunk_type).unwrap()
     }
 
-    fn isEnd(&self) -> bool { 
+    fn is_end(&self) -> bool { 
         return self.chunk_type() == "IEND"
     }
 
-    fn verifyCRC(&self) -> bool { 
+    fn verify_crc(&self) -> bool { 
+
+        println!("TODO: verify CRC {:?}",self.crc);
         return true
     }
     
 }
 
-struct chunks{
+struct Chunks{
     data: Vec<Chunk>,
 }
 
-impl chunks{
-    fn new() -> chunks{
-        chunks{
+impl Chunks{
+
+    fn new() -> Chunks{
+        Chunks{
             data: Vec::new(),
         }
     }
@@ -74,16 +68,16 @@ impl chunks{
             crc: crc_buffer
         };
 
-        let is_end = curr_chunk.isEnd();
+        let is_end = curr_chunk.is_end();
 
-        match curr_chunk.verifyCRC(){
+        println!("Chunk type: {}", curr_chunk.chunk_type());
+
+        match curr_chunk.verify_crc(){
             true => {
                 self.data.push(curr_chunk);
             },
             false => {
                 println!("Couldn't Verify CRC");
-                // REMOVE later 
-                self.data.push(curr_chunk);
             }
         }
 
@@ -92,10 +86,12 @@ impl chunks{
         
     }
 
-    fn read_header(&self){
+    fn display_header(&self){
 
         let header = &self.data[0];
         assert_eq!(header.chunk_type(), "IHDR");
+
+        assert!(header.length() > 0);
 
         let width = u32::from_be_bytes(header.chunk_data[0..4].try_into().unwrap());
         let height = u32::from_be_bytes(header.chunk_data[4..8].try_into().unwrap());
@@ -105,18 +101,18 @@ impl chunks{
         let filter_method = u8::from_be_bytes(header.chunk_data[11..12].try_into().unwrap());
         let interlace_method = u8::from_be_bytes(header.chunk_data[12..13].try_into().unwrap());
 
-
+        println!("-----IMAGE METADATA-----");
         println!("Image Width: {}, Image Height: {}", width, height);
         println!("Bit Depth: {}, Color type: {}, compression_method: {}, filter_method: {}, interplace_method: {}", bit_depth, color_type, compression_method,filter_method, interlace_method );
-    
+        println!("------------------------");
     }
 
-    fn get_dimensions(&self) -> [u32;2]{
+    fn get_dimensions(&self) -> [usize;2]{
         let header = &self.data[0];
         assert_eq!(header.chunk_type(), "IHDR");
 
-        let width = u32::from_be_bytes(header.chunk_data[0..4].try_into().unwrap());
-        let height = u32::from_be_bytes(header.chunk_data[4..8].try_into().unwrap());
+        let width = u32::from_be_bytes(header.chunk_data[0..4].try_into().unwrap()) as usize;
+        let height = u32::from_be_bytes(header.chunk_data[4..8].try_into().unwrap()) as usize;
 
         return [width, height]
     }
@@ -133,6 +129,15 @@ impl chunks{
         }
 
         result
+    }
+
+    fn read_file(& mut self, img_file: & mut File){
+
+        loop{
+            if self.add_chunk(img_file){
+                break
+            }
+        }
     }
 
 }
@@ -160,20 +165,14 @@ fn main() {
     let mut file_signature = [0;8];
     img_file.read_exact(& mut file_signature).expect("Unable to read PNG signature");
     
-    match file_signature { 
-        [137, 80, 78, 71, 13, 10, 26, 10] => println!("Valid PNG signature!"),
-        _ => panic!("Invalid PNG file signature")
-    }
+    
+    assert_eq!(file_signature, [137, 80, 78, 71, 13, 10, 26, 10], "Invalid PNG Header");
 
-    let mut chunks = chunks::new();
+    let mut chunks = Chunks::new();
 
-    loop{
-        if chunks.add_chunk(& mut img_file){
-            break
-        }
-    }
+    chunks.read_file(& mut img_file);
 
-    chunks.read_header();
+    chunks.display_header();
     
     let [width, height] = chunks.get_dimensions();
     let idat_data = chunks.get_all_idat_data();
@@ -185,18 +184,23 @@ fn main() {
 
     for i in 0.. decompress.len()/stride as usize {
 
-        let start = stride * i as u32 + 1; 
-        let end  = stride * i as u32 + stride;
+        let start = stride * i  + 1; 
+        let end  = stride * i + stride;
 
-        let row = &decompress[start as usize..end as usize];
+        let row = &decompress[start..end ];
         
         for j in 0 ..row.len()/4 {
-            let mut r = row[j * 4] as u32;
+
+            let a = row[j * 4 + 3] as u32 /255 ;
+
+            let mut r = row[j * 4] as u32 * a;
+            // dbg!(r);
             r = r << 16;
-            let mut g = row[j * 4 + 1] as u32;
+            let mut g = row[j * 4 + 1] as u32 * a;
+            // dbg!(g);
             g = g << 8;
-            let b = row[j * 4 + 2] as u32;
-            // let a = *&decompress[(j as usize) * 4 + ( i as usize * width as usize) + 3] as u32;
+            let b = row[j * 4 + 2] as u32 * a;
+            // dbg!(b);
 
             let color = r + g + b;
 
@@ -206,8 +210,8 @@ fn main() {
 
     let mut window = Window::new( 
         "test - Esc to exit", 
-        width as usize, 
-        height as usize, 
+        width, 
+        height, 
         WindowOptions::default()
     ).expect("Could not open window");
 
@@ -216,7 +220,7 @@ fn main() {
     while window.is_open() && !window.is_key_down(Key::Escape) {
 
         window
-            .update_with_buffer(&pixels, width as usize, height as usize)
+            .update_with_buffer(&pixels, width, height)
             .unwrap();
     }
 }

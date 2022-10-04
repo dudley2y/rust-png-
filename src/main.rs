@@ -1,46 +1,142 @@
 use std::{env, process::exit, io::Read};
-use image::{io::Reader };
-use minifb::{Key, Window, WindowOptions};
 use std::fs::File; 
 use std::str;
+use flate2::{Decompress, FlushDecompress};
+use miniz_oxide::inflate::decompress_to_vec_zlib;
+use minifb::{Window, Key, WindowOptions};
 
-pub fn ihdr_decode(chunk: Vec<u8> ){
-    println!("Decoding IHDR!");
-
-    let mut width_buffer = [0 ;4];
-    width_buffer[0..4].clone_from_slice(&chunk[0..4]);
-    let width = u32::from_be_bytes(width_buffer);
-
-
-    let mut height_buffer = [0 ;4];
-    height_buffer[0..4].clone_from_slice(&chunk[4..8]);
-    let height = u32::from_be_bytes(height_buffer);
-
-    let mut bit_depth_buffer = [0 ;1];
-    bit_depth_buffer[0..1].clone_from_slice(&chunk[8..9]);
-    let bit_depth  = bit_depth_buffer[0];
-
-    let mut color_type_buffer = [0 ;1];
-    color_type_buffer[0..1].clone_from_slice(&chunk[9..10]);
-    let color_type = color_type_buffer[0];
-
-    let mut compression_method_buffer = [0 ;1];
-    compression_method_buffer[0..1].clone_from_slice(&chunk[10..11]);
-    let compression_method = compression_method_buffer[0];
-
-    let mut filter_method_buffer = [0 ;1];
-    filter_method_buffer[0..1].clone_from_slice(&chunk[11..12]);
-    let filter_method = filter_method_buffer[0];
-
-    let mut interplace_method_buffer = [0 ;1];
-    interplace_method_buffer[0..1].clone_from_slice(&chunk[12..13]);
-    let interplace_method = interplace_method_buffer[0];
-
-    println!("Image Width: {}, Image Height: {}", width, height);
-    println!("Bit Depth: {}, Color type: {}, compression_method: {}, filter_method: {}, interplace_method: {}", bit_depth, color_type, compression_method,filter_method, interplace_method );
-
-    // TODO: READ 4.1.2: http://www.libpng.org/pub/png/spec/1.2/PNG-Chunks.html#C.Critical-chunks
+struct Chunk{ 
+    chunk_type: [u8; 4],
+    chunk_data: Vec<u8>, 
+    crc: [u8; 4]
 }
+
+impl Chunk {
+
+    fn new() -> Chunk{
+        Chunk{
+            chunk_type: [0;4],
+            chunk_data: Vec::new(), 
+            crc: [0;4]
+        }
+    }
+
+    fn length(&self) -> usize{
+        self.chunk_type().len()
+    }
+
+    fn chunk_type(&self) -> &str{
+        str::from_utf8(&self.chunk_type).unwrap()
+    }
+
+    fn isEnd(&self) -> bool { 
+        return self.chunk_type() == "IEND"
+    }
+
+    fn verifyCRC(&self) -> bool { 
+        return true
+    }
+    
+}
+
+struct chunks{
+    data: Vec<Chunk>,
+}
+
+impl chunks{
+    fn new() -> chunks{
+        chunks{
+            data: Vec::new(),
+        }
+    }
+
+    fn add_chunk(& mut self, img_file: &mut File) -> bool{
+
+        let mut length_buffer =  [0;4]; 
+        img_file.read_exact(& mut length_buffer).expect("Unable to read chunk length"); 
+
+
+        let mut chunk_type_buffer = [0;4];
+        img_file.read_exact(& mut chunk_type_buffer).expect("Unable to read chunk type"); 
+
+
+        let chunk_length: u32 = u32::from_be_bytes(length_buffer);
+        let mut chunk_data_buffer: Vec<u8> = vec![0; chunk_length as usize];
+        img_file.read(& mut chunk_data_buffer).expect("Unable to read chunk data");
+    
+
+        let mut crc_buffer = [0;4]; 
+        img_file.read(&mut crc_buffer).expect("Unable to read crc");
+
+        let curr_chunk = Chunk{
+            chunk_type: chunk_type_buffer, 
+            chunk_data: chunk_data_buffer, 
+            crc: crc_buffer
+        };
+
+        let is_end = curr_chunk.isEnd();
+
+        match curr_chunk.verifyCRC(){
+            true => {
+                self.data.push(curr_chunk);
+            },
+            false => {
+                println!("Couldn't Verify CRC");
+                // REMOVE later 
+                self.data.push(curr_chunk);
+            }
+        }
+
+        is_end
+
+        
+    }
+
+    fn read_header(&self){
+
+        let header = &self.data[0];
+        assert_eq!(header.chunk_type(), "IHDR");
+
+        let width = u32::from_be_bytes(header.chunk_data[0..4].try_into().unwrap());
+        let height = u32::from_be_bytes(header.chunk_data[4..8].try_into().unwrap());
+        let bit_depth = u8::from_be_bytes(header.chunk_data[8..9].try_into().unwrap());
+        let color_type = u8::from_be_bytes(header.chunk_data[9..10].try_into().unwrap());
+        let compression_method = u8::from_be_bytes(header.chunk_data[10..11].try_into().unwrap());
+        let filter_method = u8::from_be_bytes(header.chunk_data[11..12].try_into().unwrap());
+        let interlace_method = u8::from_be_bytes(header.chunk_data[12..13].try_into().unwrap());
+
+
+        println!("Image Width: {}, Image Height: {}", width, height);
+        println!("Bit Depth: {}, Color type: {}, compression_method: {}, filter_method: {}, interplace_method: {}", bit_depth, color_type, compression_method,filter_method, interlace_method );
+    
+    }
+
+    fn get_dimensions(&self) -> [u32;2]{
+        let header = &self.data[0];
+        assert_eq!(header.chunk_type(), "IHDR");
+
+        let width = u32::from_be_bytes(header.chunk_data[0..4].try_into().unwrap());
+        let height = u32::from_be_bytes(header.chunk_data[4..8].try_into().unwrap());
+
+        return [width, height]
+    }
+
+    fn get_all_idat_data(&self) -> Vec<u8>{
+        let mut result: Vec<u8> = Vec::new(); 
+
+        for chunk in &self.data{
+            if chunk.chunk_type() == "IDAT"{
+                for val in &chunk.chunk_data{
+                    result.push(val.clone());
+                }
+            }
+        }
+
+        result
+    }
+
+}
+
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -59,7 +155,7 @@ fn main() {
     let filename = &args[1]; 
 
     println!("Inspected file is {}", filename);
-
+    
     let mut img_file = File::open(filename).expect("Unable to open file");
     let mut file_signature = [0;8];
     img_file.read_exact(& mut file_signature).expect("Unable to read PNG signature");
@@ -69,89 +165,58 @@ fn main() {
         _ => panic!("Invalid PNG file signature")
     }
 
+    let mut chunks = chunks::new();
+
     loop{
-
-        let mut length_buffer =  [0;4]; 
-        img_file.read_exact(& mut length_buffer).expect("Unable to read chunk length"); 
-        let chunk_length: u32 = u32::from_be_bytes(length_buffer);
-    
-        let mut chunk_type_buffer = [0;4];
-        img_file.read_exact(& mut chunk_type_buffer).expect("Unable to read chunk type"); 
-        let chunk_type = str::from_utf8(&chunk_type_buffer).unwrap();
-    
-        let mut chunk_data_buffer: Vec<u8> = vec![0; chunk_length as usize];
-        img_file.read(& mut chunk_data_buffer).expect("Unable to read chunk data");
-    
-        let mut crc_buffer = [0;4]; 
-        img_file.read(&mut crc_buffer).expect("Unable to read crc");
-        // TODO: VALIDATE CRC 
-
-        match chunk_type {
-            "IHDR" => ihdr_decode(chunk_data_buffer),
-            "IEND" => break,
-            _ => println!("Not Implemented: {}", chunk_type)
+        if chunks.add_chunk(& mut img_file){
+            break
         }
     }
 
-
-
-
-    // let reader = Reader::open(filename).expect("Unable to open file");
-    // let file_data = reader.decode().expect("Failed to read image");
-    // dbg!(file_data.color());
-    // let mut buffer: Vec<u32> = file_data.as_rgba8().expect("Could not get rgb").pixels().map(
-    //     |x| {
-
-    //         let blue = x.0[2] as u32;   
-
-    //         let mut green = x.0[1] as u32; 
-    //         green  = green << 8;
-
-    //         let mut red = x.0[0] as u32;
-    //         red = red << 16;
-
-    //         blue + green + red 
-    //     }
-    // ).collect();
-
-    // let width = usize::try_from(file_data.width()).unwrap(); 
-    // let height = usize::try_from(file_data.height()).unwrap();
-
-    // let width_blocks_size: usize = 100; 
-    // let height_blocks_size: usize = 100;
-
-    // let number_width_blocks = width / width_blocks_size ; 
-    // let number_height_blocks = height / height_blocks_size;
-
-    // println!("Trying to create window with Width: {}, Height: {}", width, height);
-    // println!("Image has {} pixels (width * height = {})", buffer.len(), width * height);
+    chunks.read_header();
     
+    let [width, height] = chunks.get_dimensions();
+    let idat_data = chunks.get_all_idat_data();
+    let decompress:Vec<u8> = decompress_to_vec_zlib(&idat_data).unwrap();
 
-    // let mut window = Window::new( 
-    //     "test - Esc to exit", 
-    //     width, 
-    //     height, 
-    //     WindowOptions::default()
-    // ).expect("Could not open window");
+    let mut pixels: Vec<u32> = Vec::new();
 
-    // window.limit_update_rate(Some(std::time::Duration::from_micros(10)));
+    let stride = width * 4 + 1;
 
-    // while window.is_open() && !window.is_key_down(Key::Escape) {
+    for i in 0.. decompress.len()/stride as usize {
 
-    //     buffer = buffer.into_iter().map(
-    //         |x| {
-    //             if x == u32::MAX{
-    //                 0
-    //             }
-    //             else{
-    //                 x+1
-    //             }
-    //         }
-    //     ).collect();
+        let start = stride * i as u32 + 1; 
+        let end  = stride * i as u32 + stride;
 
-    //     window
-    //         .update_with_buffer(&buffer, width, height)
-    //         .unwrap();
-    // }
+        let row = &decompress[start as usize..end as usize];
+        
+        for j in 0 ..row.len()/4 {
+            let mut r = row[j * 4] as u32;
+            r = r << 16;
+            let mut g = row[j * 4 + 1] as u32;
+            g = g << 8;
+            let b = row[j * 4 + 2] as u32;
+            // let a = *&decompress[(j as usize) * 4 + ( i as usize * width as usize) + 3] as u32;
 
+            let color = r + g + b;
+
+            pixels.push(color);
+        }
+    }
+
+    let mut window = Window::new( 
+        "test - Esc to exit", 
+        width as usize, 
+        height as usize, 
+        WindowOptions::default()
+    ).expect("Could not open window");
+
+    window.limit_update_rate(Some(std::time::Duration::from_micros(10)));
+
+    while window.is_open() && !window.is_key_down(Key::Escape) {
+
+        window
+            .update_with_buffer(&pixels, width as usize, height as usize)
+            .unwrap();
+    }
 }

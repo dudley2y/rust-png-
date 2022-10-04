@@ -209,7 +209,7 @@ fn main() {
     }
 
     let mut window = Window::new( 
-        "test - Esc to exit", 
+        &filename, 
         width, 
         height, 
         WindowOptions::default()

@@ -17,6 +17,12 @@ cargo run %filename%.png
 ## Motivation
 After watching: [this video by Tsoding](https://www.youtube.com/watch?v=M9ZwuIv3xz8), I gained an interest in wondering what the insides of a PNG look like. In combination with my interest in picking up rust, I decided that this would be a perfect beginner project.
 
+## Example 
+When running the ```sh  cargo run test2.png```, this is an example output.
+![image in canvas](example.png)
+
+
+
 ## TODOS
 
  - [ ] Verify the CRC's of chunks
